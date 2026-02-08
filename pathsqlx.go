@@ -1,7 +1,9 @@
 package pathsqlx
 
 import (
+	"context"
 	"crypto/md5"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,9 +14,63 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// Type aliases for sqlx types to enable drop-in replacement
+type (
+	Rows      = sqlx.Rows
+	Row       = sqlx.Row
+	Tx        = sqlx.Tx
+	Stmt      = sqlx.Stmt
+	NamedStmt = sqlx.NamedStmt
+	Result    = sql.Result
+)
+
 // DB is a wrapper around sqlx.DB
 type DB struct {
 	*sqlx.DB
+}
+
+// Open opens a database connection. This is analogous to sql.Open, but returns a *pathsqlx.DB instead.
+func Open(driverName, dataSourceName string) (*DB, error) {
+	db, err := sqlx.Open(driverName, dataSourceName)
+	if err != nil {
+		return nil, err
+	}
+	return &DB{DB: db}, nil
+}
+
+// MustOpen is the same as Open, but panics on error.
+func MustOpen(driverName, dataSourceName string) *DB {
+	db := sqlx.MustOpen(driverName, dataSourceName)
+	return &DB{DB: db}
+}
+
+// Connect opens a database connection and verifies with a ping.
+func Connect(driverName, dataSourceName string) (*DB, error) {
+	db, err := sqlx.Connect(driverName, dataSourceName)
+	if err != nil {
+		return nil, err
+	}
+	return &DB{DB: db}, nil
+}
+
+// ConnectContext opens a database connection and verifies with a ping, using the provided context.
+func ConnectContext(ctx context.Context, driverName, dataSourceName string) (*DB, error) {
+	db, err := sqlx.ConnectContext(ctx, driverName, dataSourceName)
+	if err != nil {
+		return nil, err
+	}
+	return &DB{DB: db}, nil
+}
+
+// MustConnect is the same as Connect, but panics on error.
+func MustConnect(driverName, dataSourceName string) *DB {
+	db := sqlx.MustConnect(driverName, dataSourceName)
+	return &DB{DB: db}
+}
+
+// NewDb returns a new pathsqlx.DB wrapper for an existing sql.DB.
+func NewDb(db *sql.DB, driverName string) *DB {
+	return &DB{DB: sqlx.NewDb(db, driverName)}
 }
 
 // ByRevLen is for reverse length-based sort.
@@ -226,11 +282,4 @@ func (db *DB) PathQuery(query string, arg interface{}) (interface{}, error) {
 		return nil, err
 	}
 	return result, nil
-}
-
-// Create a pathsqlx connection
-func Create(user, password, dbname, driver, host, port string) (*DB, error) {
-	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbname)
-	db, err := sqlx.Connect(driver, dsn)
-	return &DB{db}, err
 }

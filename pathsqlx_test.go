@@ -2,6 +2,7 @@ package pathsqlx
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"reflect"
 	"testing"
@@ -9,8 +10,8 @@ import (
 	"gopkg.in/gcfg.v1"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 var db *DB
@@ -32,10 +33,12 @@ func init() {
 	if err != nil {
 		log.Fatalf("Failed to parse gcfg data: %s", err)
 	}
-	db, err = Create(cfg.Test.Username, cfg.Test.Password, cfg.Test.Database, cfg.Test.Driver, cfg.Test.Address, cfg.Test.Port)
+	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", cfg.Test.Address, cfg.Test.Port, cfg.Test.Username, cfg.Test.Password, cfg.Test.Database)
+	idb, err := sqlx.Connect(cfg.Test.Driver, dsn)
 	if err != nil {
 		log.Fatalln(err)
 	}
+	db = &DB{DB: idb}
 }
 
 func TestDB_Q(t *testing.T) {
@@ -123,33 +126,24 @@ func TestDB_Q(t *testing.T) {
 	}
 }
 
-func TestCreate(t *testing.T) {
-	type args struct {
-		user     string
-		password string
-		dbname   string
-		driver   string
-		host     string
-		port     string
+func TestConnect(t *testing.T) {
+	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		cfg.Test.Address, cfg.Test.Port, cfg.Test.Username, cfg.Test.Password, cfg.Test.Database)
+
+	testDb, err := Connect(cfg.Test.Driver, dsn)
+	if err != nil {
+		t.Errorf("Connect() error = %v", err)
+		return
 	}
-	tests := []struct {
-		name    string
-		args    args
-		want    *DB
-		wantErr bool
-	}{
-		// TODO: Add test cases.
+	defer testDb.Close()
+
+	// Verify the connection works
+	var result int
+	err = testDb.Get(&result, "SELECT 1")
+	if err != nil {
+		t.Errorf("Connect() produced db that can't query: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := Create(tt.args.user, tt.args.password, tt.args.dbname, tt.args.driver, tt.args.host, tt.args.port)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Create() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("Create() = %v, want %v", got, tt.want)
-			}
-		})
+	if result != 1 {
+		t.Errorf("Connect() query returned %d, want 1", result)
 	}
 }
