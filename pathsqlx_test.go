@@ -41,7 +41,7 @@ func init() {
 	db = &DB{DB: idb}
 }
 
-func TestDB_Q(t *testing.T) {
+func TestPathQuery(t *testing.T) {
 	type args struct {
 		query string
 		arg   string
@@ -112,7 +112,7 @@ func TestDB_Q(t *testing.T) {
 			}
 			got, err := tt.db.PathQuery(tt.args.query, args)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("DB.Q() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("PathQuery() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			json, err := json.Marshal(got)
@@ -120,7 +120,7 @@ func TestDB_Q(t *testing.T) {
 				log.Fatal("Cannot encode to JSON ", err)
 			}
 			if !reflect.DeepEqual(string(json), tt.want) {
-				t.Errorf("DB.Q() = %v, want %v", string(json), tt.want)
+				t.Errorf("PathQuery() = %v, want %v", string(json), tt.want)
 			}
 		})
 	}
