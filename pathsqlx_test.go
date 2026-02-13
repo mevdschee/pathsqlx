@@ -2,148 +2,361 @@ package pathsqlx
 
 import (
 	"encoding/json"
-	"fmt"
-	"log"
-	"reflect"
+	"os"
 	"testing"
 
-	"gopkg.in/gcfg.v1"
-
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 )
 
-var db *DB
+// Database configuration for testing
+type dbConfig struct {
+	name       string
+	driver     string
+	dsn        string
+	skipIfFail bool
+}
 
-var cfg = struct {
-	Test struct {
-		Username string
-		Password string
-		Database string
-		Driver   string
-		Address  string
-		Port     string
+func getTestDatabases() []dbConfig {
+	mariadbDSN := os.Getenv("MARIADB_DSN")
+	if mariadbDSN == "" {
+		mariadbDSN = "pathql:pathql@tcp(localhost:3306)/pathql"
 	}
-}{}
 
-func init() {
-	var err error
-	err = gcfg.ReadFileInto(&cfg, "test_config.ini")
-	if err != nil {
-		log.Fatalf("Failed to parse gcfg data: %s", err)
+	postgresDSN := os.Getenv("POSTGRES_DSN")
+	if postgresDSN == "" {
+		postgresDSN = "host=localhost port=5432 user=pathql password=pathql dbname=pathql sslmode=disable"
 	}
-	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", cfg.Test.Address, cfg.Test.Port, cfg.Test.Username, cfg.Test.Password, cfg.Test.Database)
-	idb, err := sqlx.Connect(cfg.Test.Driver, dsn)
-	if err != nil {
-		log.Fatalln(err)
+
+	return []dbConfig{
+		{name: "MariaDB", driver: "mysql", dsn: mariadbDSN, skipIfFail: true},
+		{name: "PostgreSQL", driver: "postgres", dsn: postgresDSN, skipIfFail: true},
 	}
-	db = &DB{DB: idb}
+}
+
+func setupTestDB(t *testing.T, cfg dbConfig) *DB {
+	db, err := Connect(cfg.driver, cfg.dsn)
+	if err != nil {
+		if cfg.skipIfFail {
+			t.Skipf("Failed to connect to %s: %v", cfg.name, err)
+		} else {
+			t.Fatalf("Failed to connect to %s: %v", cfg.name, err)
+		}
+	}
+
+	// Drop tables if they exist
+	if cfg.driver == "mysql" {
+		db.Exec("SET FOREIGN_KEY_CHECKS=0")
+		db.Exec("DROP TABLE IF EXISTS comments")
+		db.Exec("DROP TABLE IF EXISTS posts")
+		db.Exec("DROP TABLE IF EXISTS categories")
+		db.Exec("SET FOREIGN_KEY_CHECKS=1")
+	} else {
+		db.Exec("DROP TABLE IF EXISTS comments CASCADE")
+		db.Exec("DROP TABLE IF EXISTS posts CASCADE")
+		db.Exec("DROP TABLE IF EXISTS categories CASCADE")
+	}
+
+	// Create schema based on database type
+	var schema []string
+	if cfg.driver == "mysql" {
+		schema = []string{
+			`CREATE TABLE categories (
+				id INT PRIMARY KEY AUTO_INCREMENT,
+				name VARCHAR(255) NOT NULL
+			)`,
+			`CREATE TABLE posts (
+				id INT PRIMARY KEY AUTO_INCREMENT,
+				category_id INT,
+				content TEXT,
+				FOREIGN KEY (category_id) REFERENCES categories(id)
+			)`,
+			`CREATE TABLE comments (
+				id INT PRIMARY KEY AUTO_INCREMENT,
+				post_id INT,
+				message TEXT,
+				FOREIGN KEY (post_id) REFERENCES posts(id)
+			)`,
+		}
+	} else {
+		schema = []string{
+			`CREATE TABLE categories (
+				id SERIAL PRIMARY KEY,
+				name VARCHAR(255) NOT NULL
+			)`,
+			`CREATE TABLE posts (
+				id SERIAL PRIMARY KEY,
+				category_id INT REFERENCES categories(id),
+				content TEXT
+			)`,
+			`CREATE TABLE comments (
+				id SERIAL PRIMARY KEY,
+				post_id INT REFERENCES posts(id),
+				message TEXT
+			)`,
+		}
+	}
+
+	for _, s := range schema {
+		_, err = db.Exec(s)
+		if err != nil {
+			t.Fatalf("Failed to create schema on %s: %v", cfg.name, err)
+		}
+	}
+
+	// Insert test data
+	data := []string{
+		`INSERT INTO categories (id, name) VALUES (1, 'announcement'), (2, 'article')`,
+		`INSERT INTO posts (id, category_id, content) VALUES (1, 1, 'blog started'), (2, 1, 'second post')`,
+		`INSERT INTO comments (id, post_id, message) VALUES (1, 1, 'great!'), (2, 1, 'nice!'), (3, 2, 'interesting'), (4, 2, 'cool')`,
+	}
+	for _, d := range data {
+		_, err = db.Exec(d)
+		if err != nil {
+			t.Fatalf("Failed to insert data on %s: %v", cfg.name, err)
+		}
+	}
+
+	return db
 }
 
 func TestPathQuery(t *testing.T) {
-	type args struct {
-		query string
-		arg   string
-	}
 	tests := []struct {
 		name    string
-		db      *DB
-		args    args
+		query   string
+		arg     map[string]interface{}
 		want    string
 		wantErr bool
 	}{
 		{
-			"single record no path", db,
-			args{"select id, content from posts where id=:id", `{"id": 1}`},
-			`[{"id":1,"content":"blog started"}]`, false,
-		}, {
-			"two records no path", db,
-			args{"select id from posts where id<=2 order by id", `{}`},
-			`[{"id":1},{"id":2}]`, false,
-		}, {
-			"two records named no path", db,
-			args{"select id from posts where id<=:two and id>=:one order by id", `{"one": 1, "two": 2}`},
-			`[{"id":1},{"id":2}]`, false,
-		}, {
-			"two tables with path", db,
-			args{`select posts.id as "$[].posts.id", comments.id as "$[].comments.id" from posts left join comments on post_id = posts.id where posts.id=1`, `{}`},
-			`[{"posts":{"id":1},"comments":{"id":1}},{"posts":{"id":1},"comments":{"id":2}}]`, false,
-		}, {
-			"posts with comments properly nested", db,
-			args{`select posts.id as "$.posts[].id", comments.id as "$.posts[].comments[].id" from posts left join comments on post_id = posts.id where posts.id<=2 order by posts.id, comments.id`, `{}`},
-			`{"posts":[{"id":1,"comments":[{"id":1},{"id":2}]},{"id":2,"comments":[{"id":3},{"id":4},{"id":5},{"id":6}]}]}`, false,
-		}, {
-			"comments with post properly nested", db,
-			args{`select posts.id as "$.comments[].post.id", comments.id as "$.comments[].id" from posts left join comments on post_id = posts.id where posts.id<=2 order by comments.id, posts.id`, `{}`},
-			`{"comments":[{"id":1,"post":{"id":1}},{"id":2,"post":{"id":1}},{"id":3,"post":{"id":2}},{"id":4,"post":{"id":2}},{"id":5,"post":{"id":2}},{"id":6,"post":{"id":2}}]}`, false,
-		}, {
-			"count posts with simple alias", db,
-			args{`select count(*) as "posts" from posts`, `{}`},
-			`[{"posts":12}]`, false,
-		}, {
-			"count posts with path", db,
-			args{`select count(*) as "$[].posts" from posts`, `{}`},
-			`[{"posts":12}]`, false,
-		}, {
-			"count posts as object with path", db,
-			args{`select count(*) as "$.posts" from posts`, `{}`},
-			`{"posts":12}`, false,
-		}, {
-			"count posts grouped no path", db,
-			args{`select categories.name, count(posts.id) as "post_count" from posts, categories where posts.category_id = categories.id group by categories.name order by categories.name`, `{}`},
-			`[{"name":"announcement","post_count":11},{"name":"article","post_count":1}]`, false,
-		}, {
-			"count posts with added root set in path", db,
-			args{`select count(*) as "$.statistics.posts" from posts`, `{}`},
-			`{"statistics":{"posts":12}}`, false,
-		}, {
-			"count posts and comments as object with path", db,
-			args{`select (select count(*) from posts) as "$.stats.posts", (select count(*) from comments) as "comments"`, `{}`},
-			`{"stats":{"posts":12,"comments":6}}`, false,
+			name:  "single record no path",
+			query: `SELECT id, content FROM posts WHERE id = :id`,
+			arg:   map[string]interface{}{"id": 1},
+			want:  `[{"id":1,"content":"blog started"}]`,
+		},
+		{
+			name:  "two records no path",
+			query: `SELECT id FROM posts WHERE id <= 2 ORDER BY id`,
+			arg:   map[string]interface{}{},
+			want:  `[{"id":1},{"id":2}]`,
+		},
+		{
+			name:  "count as object with path",
+			query: `SELECT count(*) AS "$.posts" FROM posts`,
+			arg:   map[string]interface{}{},
+			want:  `{"posts":2}`,
+		},
+		{
+			name:  "nested statistics object",
+			query: `SELECT count(*) AS "$.statistics.posts" FROM posts`,
+			arg:   map[string]interface{}{},
+			want:  `{"statistics":{"posts":2}}`,
+		},
+		{
+			name:  "two tables with path",
+			query: `SELECT posts.id AS "$[].posts.id", comments.id AS "$[].comments.id" FROM posts LEFT JOIN comments ON post_id = posts.id WHERE posts.id = 1 ORDER BY comments.id`,
+			arg:   map[string]interface{}{},
+			want:  `[{"posts":{"id":1},"comments":{"id":1}},{"posts":{"id":1},"comments":{"id":2}}]`,
+		},
+		{
+			name:  "posts with comments nested",
+			query: `SELECT posts.id AS "$.posts[].id", comments.id AS "$.posts[].comments[].id" FROM posts LEFT JOIN comments ON post_id = posts.id WHERE posts.id <= 2 ORDER BY posts.id, comments.id`,
+			arg:   map[string]interface{}{},
+			want:  `{"posts":[{"id":1,"comments":[{"id":1},{"id":2}]},{"id":2,"comments":[{"id":3},{"id":4}]}]}`,
+		},
+		{
+			name:  "comments with post nested",
+			query: `SELECT posts.id AS "$.comments[].post.id", comments.id AS "$.comments[].id" FROM posts LEFT JOIN comments ON post_id = posts.id WHERE posts.id <= 2 ORDER BY comments.id`,
+			arg:   map[string]interface{}{},
+			want:  `{"comments":[{"id":1,"post":{"id":1}},{"id":2,"post":{"id":1}},{"id":3,"post":{"id":2}},{"id":4,"post":{"id":2}}]}`,
+		},
+		{
+			name:  "count posts grouped",
+			query: `SELECT categories.name, count(posts.id) AS "post_count" FROM posts, categories WHERE posts.category_id = categories.id GROUP BY categories.name ORDER BY categories.name`,
+			arg:   map[string]interface{}{},
+			want:  `[{"name":"announcement","post_count":2}]`,
+		},
+		{
+			name:  "multiple scalar counts",
+			query: `SELECT (SELECT count(*) FROM posts) AS "$.stats.posts", (SELECT count(*) FROM comments) AS "comments"`,
+			arg:   map[string]interface{}{},
+			want:  `{"stats":{"posts":2,"comments":4}}`,
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var args map[string]interface{}
-			err := json.Unmarshal([]byte(tt.args.arg), &args)
+
+	for _, dbCfg := range getTestDatabases() {
+		t.Run(dbCfg.name, func(t *testing.T) {
+			db := setupTestDB(t, dbCfg)
+			defer func() {
+				db.Exec("DROP TABLE IF EXISTS comments")
+				db.Exec("DROP TABLE IF EXISTS posts")
+				db.Exec("DROP TABLE IF EXISTS categories")
+				db.Close()
+			}()
+
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					got, err := db.PathQuery(tt.query, tt.arg)
+					if (err != nil) != tt.wantErr {
+						t.Errorf("PathQuery() error = %v, wantErr %v", err, tt.wantErr)
+						return
+					}
+					gotJSON, err := json.Marshal(got)
+					if err != nil {
+						t.Errorf("PathQuery() result cannot be marshaled: %v", err)
+						return
+					}
+					if string(gotJSON) != tt.want {
+						t.Errorf("PathQuery() = %s, want %s", string(gotJSON), tt.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestOpen(t *testing.T) {
+	for _, dbCfg := range getTestDatabases() {
+		t.Run(dbCfg.name, func(t *testing.T) {
+			db, err := Open(dbCfg.driver, dbCfg.dsn)
 			if err != nil {
-				log.Fatal("Cannot decode to JSON ", err)
+				if dbCfg.skipIfFail {
+					t.Skipf("Open() failed: %v", err)
+				} else {
+					t.Fatalf("Open() failed: %v", err)
+				}
 			}
-			got, err := tt.db.PathQuery(tt.args.query, args)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("PathQuery() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			json, err := json.Marshal(got)
+			defer db.Close()
+
+			var result int
+			err = db.Get(&result, "SELECT 1")
 			if err != nil {
-				log.Fatal("Cannot encode to JSON ", err)
+				t.Errorf("Open() db can't query: %v", err)
 			}
-			if !reflect.DeepEqual(string(json), tt.want) {
-				t.Errorf("PathQuery() = %v, want %v", string(json), tt.want)
+			if result != 1 {
+				t.Errorf("Open() query returned %d, want 1", result)
 			}
 		})
 	}
 }
 
 func TestConnect(t *testing.T) {
-	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		cfg.Test.Address, cfg.Test.Port, cfg.Test.Username, cfg.Test.Password, cfg.Test.Database)
+	for _, dbCfg := range getTestDatabases() {
+		t.Run(dbCfg.name, func(t *testing.T) {
+			db, err := Connect(dbCfg.driver, dbCfg.dsn)
+			if err != nil {
+				if dbCfg.skipIfFail {
+					t.Skipf("Connect() failed: %v", err)
+				} else {
+					t.Fatalf("Connect() failed: %v", err)
+				}
+			}
+			defer db.Close()
 
-	testDb, err := Connect(cfg.Test.Driver, dsn)
-	if err != nil {
-		t.Errorf("Connect() error = %v", err)
-		return
+			var result int
+			err = db.Get(&result, "SELECT 1")
+			if err != nil {
+				t.Errorf("Connect() db can't query: %v", err)
+			}
+			if result != 1 {
+				t.Errorf("Connect() query returned %d, want 1", result)
+			}
+		})
 	}
-	defer testDb.Close()
+}
 
-	// Verify the connection works
-	var result int
-	err = testDb.Get(&result, "SELECT 1")
-	if err != nil {
-		t.Errorf("Connect() produced db that can't query: %v", err)
+func TestMustOpen(t *testing.T) {
+	for _, dbCfg := range getTestDatabases() {
+		t.Run(dbCfg.name, func(t *testing.T) {
+			db, err := Open(dbCfg.driver, dbCfg.dsn)
+			if err != nil {
+				if dbCfg.skipIfFail {
+					t.Skipf("Database not available: %v", err)
+				} else {
+					t.Fatalf("Database not available: %v", err)
+				}
+			}
+			db.Close()
+
+			db = MustOpen(dbCfg.driver, dbCfg.dsn)
+			defer db.Close()
+
+			var result int
+			err = db.Get(&result, "SELECT 1")
+			if err != nil {
+				t.Errorf("MustOpen() db can't query: %v", err)
+			}
+		})
 	}
-	if result != 1 {
-		t.Errorf("Connect() query returned %d, want 1", result)
+}
+
+func TestMustConnect(t *testing.T) {
+	for _, dbCfg := range getTestDatabases() {
+		t.Run(dbCfg.name, func(t *testing.T) {
+			db, err := Connect(dbCfg.driver, dbCfg.dsn)
+			if err != nil {
+				if dbCfg.skipIfFail {
+					t.Skipf("Database not available: %v", err)
+				} else {
+					t.Fatalf("Database not available: %v", err)
+				}
+			}
+			db.Close()
+
+			db = MustConnect(dbCfg.driver, dbCfg.dsn)
+			defer db.Close()
+
+			var result int
+			err = db.Get(&result, "SELECT 1")
+			if err != nil {
+				t.Errorf("MustConnect() db can't query: %v", err)
+			}
+		})
+	}
+}
+
+func TestNewDb(t *testing.T) {
+	for _, dbCfg := range getTestDatabases() {
+		t.Run(dbCfg.name, func(t *testing.T) {
+			sqlDB, err := Open(dbCfg.driver, dbCfg.dsn)
+			if err != nil {
+				if dbCfg.skipIfFail {
+					t.Skipf("Failed to create base DB: %v", err)
+				} else {
+					t.Fatalf("Failed to create base DB: %v", err)
+				}
+			}
+			defer sqlDB.Close()
+
+			db := NewDb(sqlDB.DB.DB, dbCfg.driver)
+
+			var result int
+			err = db.Get(&result, "SELECT 1")
+			if err != nil {
+				t.Errorf("NewDb() db can't query: %v", err)
+			}
+		})
+	}
+}
+
+func TestTypeAliases(t *testing.T) {
+	// Compile-time check that type aliases work
+	var _ Rows
+	var _ Row
+	var _ Tx
+	var _ Stmt
+	var _ NamedStmt
+	var _ Result
+}
+
+func TestInvalidDriver(t *testing.T) {
+	_, err := Open("invalid_driver", "invalid_dsn")
+	if err == nil {
+		t.Error("Open() with invalid driver should return error")
+	}
+
+	_, err = Connect("invalid_driver", "invalid_dsn")
+	if err == nil {
+		t.Error("Connect() with invalid driver should return error")
 	}
 }

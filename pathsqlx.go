@@ -106,11 +106,41 @@ func (db *DB) getAllRecords(rows *sqlx.Rows, paths []string) ([]*orderedmap.Orde
 		}
 		record := orderedmap.New()
 		for i, value := range row {
+			// Convert []byte to appropriate type for proper JSON serialization
+			if b, ok := value.([]byte); ok {
+				value = convertBytes(b)
+			}
 			record.Set(paths[i][1:], value)
 		}
 		records = append(records, record)
 	}
 	return records, nil
+}
+
+// convertBytes converts []byte to the appropriate Go type (int64, float64, or string)
+func convertBytes(b []byte) interface{} {
+	s := string(b)
+
+	// Try parsing as integer first
+	var i int64
+	if _, err := fmt.Sscanf(s, "%d", &i); err == nil {
+		// Verify it's actually an integer (no extra characters)
+		if fmt.Sprintf("%d", i) == s {
+			return i
+		}
+	}
+
+	// Try parsing as float
+	var f float64
+	if _, err := fmt.Sscanf(s, "%f", &f); err == nil {
+		// Only use float if it has a decimal point
+		if strings.Contains(s, ".") {
+			return f
+		}
+	}
+
+	// Return as string
+	return s
 }
 
 func (db *DB) groupBySeparator(records []*orderedmap.OrderedMap, separator string) ([]*orderedmap.OrderedMap, error) {
