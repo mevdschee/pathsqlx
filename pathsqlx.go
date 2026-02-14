@@ -152,9 +152,7 @@ func (db *DB) getAllRecords(rows *sqlx.Rows, paths []string) ([]*orderedmap.Orde
 			// $[].id → [].id
 			// $.id → .id
 			path := paths[i]
-			if strings.HasPrefix(path, "$") {
-				path = path[1:] // Remove "$"
-			}
+			path = strings.TrimPrefix(path, "$")
 			// Strip [] from the final property name (rightmost segment)
 			// [].comments[].id → [].comments[].id (keep structure)
 			// But ensure the final key name doesn't include []
@@ -457,9 +455,7 @@ func (db *DB) PathQuery(query string, arg interface{}) (interface{}, error) {
 		for _, key := range records[0].Keys() {
 			value, _ := records[0].Get(key)
 			// Strip leading dot from key
-			if strings.HasPrefix(key, ".") {
-				key = key[1:]
-			}
+			key = strings.TrimPrefix(key, ".")
 			// Create nested structure if key contains dots
 			if strings.Contains(key, ".") {
 				parts := strings.Split(key, ".")
