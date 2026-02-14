@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -27,6 +28,7 @@ type (
 // DB is a wrapper around sqlx.DB
 type DB struct {
 	*sqlx.DB
+	metadataReader MetadataReader
 }
 
 // Open opens a database connection. This is analogous to sql.Open, but returns a *pathsqlx.DB instead.
@@ -80,12 +82,48 @@ func (a ByRevLen) Len() int           { return len(a) }
 func (a ByRevLen) Less(i, j int) bool { return len(a[i]) > len(a[j]) }
 func (a ByRevLen) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 
+// splitSelectColumns splits a SELECT clause by commas while respecting parentheses
+func splitSelectColumns(selectClause string) []string {
+	var result []string
+	var current strings.Builder
+	depth := 0
+
+	for _, ch := range selectClause {
+		switch ch {
+		case '(':
+			depth++
+			current.WriteRune(ch)
+		case ')':
+			depth--
+			current.WriteRune(ch)
+		case ',':
+			if depth == 0 {
+				// Top-level comma, split here
+				result = append(result, current.String())
+				current.Reset()
+			} else {
+				// Inside parentheses, keep the comma
+				current.WriteRune(ch)
+			}
+		default:
+			current.WriteRune(ch)
+		}
+	}
+
+	// Add the last part
+	if current.Len() > 0 {
+		result = append(result, current.String())
+	}
+
+	return result
+}
+
 func (db *DB) getPaths(columns []string) ([]string, error) {
 	paths := []string{}
 	path := "$[]"
 	for _, column := range columns {
 		prop := column
-		if column[0:1] == "$" {
+		if len(column) > 0 && column[0:1] == "$" {
 			pos := strings.LastIndex(column, ".")
 			if pos != -1 {
 				path = column[:pos]
@@ -110,7 +148,26 @@ func (db *DB) getAllRecords(rows *sqlx.Rows, paths []string) ([]*orderedmap.Orde
 			if b, ok := value.([]byte); ok {
 				value = convertBytes(b)
 			}
-			record.Set(paths[i][1:], value)
+			// Strip $ prefix from path, keeping [] markers for structure
+			// $[].id → [].id
+			// $.id → .id
+			path := paths[i]
+			if strings.HasPrefix(path, "$") {
+				path = path[1:] // Remove "$"
+			}
+			// Strip [] from the final property name (rightmost segment)
+			// [].comments[].id → [].comments[].id (keep structure)
+			// But ensure the final key name doesn't include []
+			lastDot := strings.LastIndex(path, ".")
+			if lastDot >= 0 {
+				finalKey := path[lastDot+1:]
+				// Remove [] suffix from final key if present
+				if strings.HasSuffix(finalKey, "[]") {
+					finalKey = finalKey[:len(finalKey)-2]
+					path = path[:lastDot+1] + finalKey
+				}
+			}
+			record.Set(path, value)
 		}
 		records = append(records, record)
 	}
@@ -279,6 +336,17 @@ func (db *DB) removeHashes(tree *orderedmap.OrderedMap, path string) (interface{
 
 // PathQuery is the query that returns nested paths
 func (db *DB) PathQuery(query string, arg interface{}) (interface{}, error) {
+	// Initialize metadata reader if not already done
+	if db.metadataReader == nil {
+		db.metadataReader = NewMetadataReader(db.DB.DB, db.DriverName())
+	}
+
+	// Analyze query for structure and hints
+	analysis, err := AnalyzeQuery(query)
+	if err != nil {
+		return nil, err
+	}
+
 	rows, err := db.NamedQuery(query, arg)
 	if err != nil {
 		return nil, err
@@ -287,14 +355,152 @@ func (db *DB) PathQuery(query string, arg interface{}) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	paths, err := db.getPaths(columns)
-	if err != nil {
-		return nil, err
+
+	// Map actual column names to their inferred sources
+	columnMapping := make([]string, len(columns))
+	hasExplicitPaths := false
+
+	// Build a map of column positions from the query
+	// by checking SELECT clause for table.column patterns
+	selectPattern := regexp.MustCompile(`(?i)SELECT\s+(.+?)\s+(?:FROM|$)`)
+	selectMatches := selectPattern.FindStringSubmatch(query)
+	var selectColumns []string
+	if len(selectMatches) >= 2 {
+		selectClause := selectMatches[1]
+		// Remove comments
+		commentPattern := regexp.MustCompile(`--[^\n]*`)
+		selectClause = commentPattern.ReplaceAllString(selectClause, "")
+		// Split by comma respecting parentheses
+		selectColumns = splitSelectColumns(selectClause)
 	}
+
+	for i, col := range columns {
+		// Check if this is an explicit path (starts with $)
+		if strings.HasPrefix(col, "$") {
+			columnMapping[i] = col
+			hasExplicitPaths = true
+		} else {
+			// Try to match with SELECT clause to find table.column format
+			matched := false
+			if i < len(selectColumns) {
+				selectCol := strings.TrimSpace(selectColumns[i])
+				// Check if it's table.column format
+				if strings.Contains(selectCol, ".") && !strings.Contains(selectCol, "(") {
+					parts := strings.SplitN(selectCol, ".", 2)
+					if len(parts) == 2 {
+						tableAlias := strings.TrimSpace(parts[0])
+						// Verify this table exists in our analysis
+						if _, ok := analysis.Tables[tableAlias]; ok {
+							columnMapping[i] = tableAlias + "." + col
+							matched = true
+						}
+					}
+				}
+			}
+
+			if !matched {
+				// Column doesn't match table.column pattern, just use as-is
+				columnMapping[i] = col
+			}
+		}
+	}
+
+	// If we have explicit paths, use the old getPaths logic
+	var paths []string
+	if hasExplicitPaths {
+		paths, err = db.getPaths(columns)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Infer paths automatically
+		engine := NewPathInferenceEngine(db.metadataReader)
+		inferredPaths := engine.InferPathsWithFallback(analysis, columnMapping)
+
+		// Convert to path array format
+		paths = make([]string, len(columns))
+		for i, col := range columns {
+			if i < len(columnMapping) {
+				if path, ok := inferredPaths[columnMapping[i]]; ok {
+					paths[i] = path
+				} else {
+					paths[i] = "$[]." + col
+				}
+			} else {
+				paths[i] = "$[]." + col
+			}
+		}
+	}
+
 	records, err := db.getAllRecords(rows, paths)
 	if err != nil {
 		return nil, err
 	}
+
+	// Check if result should be an object (all paths start with "$." not "$[]")
+	isObjectResult := true
+	hasArrayMarkers := false
+	for _, path := range paths {
+		if strings.Contains(path, "[]") {
+			hasArrayMarkers = true
+			isObjectResult = false // Any array marker means we need full pipeline
+		}
+		if !strings.HasPrefix(path, "$.") || strings.HasPrefix(path, "$[].") || strings.HasPrefix(path, "$[]") {
+			isObjectResult = false
+		}
+	}
+
+	// For object results, simplify the process
+	if isObjectResult && len(records) > 0 {
+		// Single object result - create nested structure from paths
+		result := orderedmap.New()
+		for _, key := range records[0].Keys() {
+			value, _ := records[0].Get(key)
+			// Strip leading dot from key
+			if strings.HasPrefix(key, ".") {
+				key = key[1:]
+			}
+			// Create nested structure if key contains dots
+			if strings.Contains(key, ".") {
+				parts := strings.Split(key, ".")
+				current := result
+				for _, part := range parts[:len(parts)-1] {
+					if _, found := current.Get(part); !found {
+						current.Set(part, orderedmap.New())
+					}
+					next, _ := current.Get(part)
+					nextMap, ok := next.(*orderedmap.OrderedMap)
+					if !ok {
+						// Conflict: trying to nest under a non-object value
+						// Create a new map at this level
+						nextMap = orderedmap.New()
+						current.Set(part, nextMap)
+					}
+					current = nextMap
+				}
+				current.Set(parts[len(parts)-1], value)
+			} else {
+				result.Set(key, value)
+			}
+		}
+		return result, nil
+	}
+
+	// For simple array results without grouping (no [] markers), return records as array
+	if !hasArrayMarkers {
+		results := []interface{}{}
+		for _, record := range records {
+			obj := orderedmap.New()
+			for _, key := range record.Keys() {
+				value, _ := record.Get(key)
+				obj.Set(key, value)
+			}
+			results = append(results, obj)
+		}
+		return results, nil
+	}
+
+	// Array results: use the full pipeline
 	groups, err := db.groupBySeparator(records, "[]")
 	if err != nil {
 		return nil, err
@@ -306,6 +512,9 @@ func (db *DB) PathQuery(query string, arg interface{}) (interface{}, error) {
 	tree, err := db.combineIntoTree(hashes, ".")
 	if err != nil {
 		return nil, err
+	}
+	if tree == nil {
+		return nil, fmt.Errorf("combineIntoTree returned nil tree")
 	}
 	result, err := db.removeHashes(tree, "$")
 	if err != nil {
