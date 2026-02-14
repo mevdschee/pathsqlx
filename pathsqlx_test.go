@@ -172,7 +172,7 @@ func TestPathQuery(t *testing.T) {
 		},
 		{
 			name:  "multiple scalar counts",
-			query: `SELECT (SELECT count(*) FROM posts) as posts, (SELECT count(*) FROM comments) as comments from (select 1) as p -- PATH $ $.statistics`,
+			query: `SELECT (SELECT count(*) FROM posts) as posts, (SELECT count(*) FROM comments) as comments -- PATH $ $.statistics`,
 			arg:   map[string]interface{}{},
 			want:  `{"statistics":{"posts":2,"comments":4}}`,
 		},
