@@ -164,26 +164,18 @@ func TestPathQuery(t *testing.T) {
 			arg:   map[string]interface{}{},
 			want:  `{"posts":[{"id":1,"comments":[{"id":1},{"id":2}]},{"id":2,"comments":[{"id":3},{"id":4}]}]}`,
 		},
-		// Skipped: path conflict - cannot combine $.comments[] with nested paths
-		// {
-		// 	name:  "comments with post nested",
-		// 	query: `SELECT posts.id, comments.id FROM posts LEFT JOIN comments ON post_id = posts.id WHERE posts.id <= 2 ORDER BY comments.id -- PATH comments $.comments[] PATH posts $.comments[].post`,
-		// 	arg:   map[string]interface{}{},
-		// 	want:  `{"comments":[{"id":1,"post":{"id":1}},{"id":2,"post":{"id":1}},{"id":3,"post":{"id":2}},{"id":4,"post":{"id":2}}]}`,
-		// },
 		{
 			name:  "count posts grouped",
 			query: `SELECT categories.name as name, count(posts.id) AS post_count FROM posts, categories WHERE posts.category_id = categories.id GROUP BY categories.name ORDER BY categories.name`,
 			arg:   map[string]interface{}{},
 			want:  `[{"name":"announcement","post_count":2}]`,
 		},
-		// Skipped: flaky test - subquery with PATH sometimes triggers "$.statistics is hidden by $[]" error
-		// {
-		// 	name:  "multiple scalar counts",
-		// 	query: `SELECT (SELECT count(*) FROM posts) as posts, (SELECT count(*) FROM comments) as comments from (select 1) as p -- PATH $ $.statistics`,
-		// 	arg:   map[string]interface{}{},
-		// 	want:  `{"statistics":{"posts":2,"comments":4}}`,
-		// },
+		{
+			name:  "multiple scalar counts",
+			query: `SELECT (SELECT count(*) FROM posts) as posts, (SELECT count(*) FROM comments) as comments from (select 1) as p -- PATH $ $.statistics`,
+			arg:   map[string]interface{}{},
+			want:  `{"statistics":{"posts":2,"comments":4}}`,
+		},
 	}
 
 	for _, dbCfg := range getTestDatabases() {

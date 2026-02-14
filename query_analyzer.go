@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/xwb1989/sqlparser"
 )
 
 // JoinInfo represents information about a JOIN clause
@@ -82,8 +84,58 @@ func extractPathHints(sql string) map[string]string {
 	return hints
 }
 
-// extractFromClause extracts table and alias from FROM clause
+// extractFromClause extracts table and alias from FROM clause using SQL parser
 func extractFromClause(sql string, analysis *QueryAnalysis) {
+	// Parse SQL using Vitess parser
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		// Fall back to regex if parse fails
+		extractFromClauseRegex(sql, analysis)
+		return
+	}
+
+	// Extract tables from SELECT statement
+	switch stmt := stmt.(type) {
+	case *sqlparser.Select:
+		for _, tableExpr := range stmt.From {
+			extractTablesFromExpr(tableExpr, analysis)
+		}
+	}
+}
+
+// extractTablesFromExpr recursively extracts tables from table expressions
+func extractTablesFromExpr(tableExpr sqlparser.TableExpr, analysis *QueryAnalysis) {
+	switch table := tableExpr.(type) {
+	case *sqlparser.AliasedTableExpr:
+		switch expr := table.Expr.(type) {
+		case sqlparser.TableName:
+			tableName := expr.Name.String()
+			alias := tableName
+			if !table.As.IsEmpty() {
+				alias = table.As.String()
+			}
+			analysis.Tables[alias] = tableName
+		case *sqlparser.Subquery:
+			// Handle subquery with alias
+			if !table.As.IsEmpty() {
+				alias := table.As.String()
+				analysis.Tables[alias] = "(subquery)"
+			}
+		}
+	case *sqlparser.JoinTableExpr:
+		// Handle joins recursively
+		extractTablesFromExpr(table.LeftExpr, analysis)
+		extractTablesFromExpr(table.RightExpr, analysis)
+	case *sqlparser.ParenTableExpr:
+		// Handle parenthesized table expressions
+		for _, expr := range table.Exprs {
+			extractTablesFromExpr(expr, analysis)
+		}
+	}
+}
+
+// extractFromClauseRegex is the fallback regex-based implementation
+func extractFromClauseRegex(sql string, analysis *QueryAnalysis) {
 	// Remove comments
 	sql = removeComments(sql)
 
@@ -133,8 +185,100 @@ func extractFromClause(sql string, analysis *QueryAnalysis) {
 	}
 }
 
-// extractJoins extracts JOIN information from the query
+// extractJoins extracts JOIN information from the query using SQL parser
 func extractJoins(sql string, analysis *QueryAnalysis) {
+	// Parse SQL using Vitess parser
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		// Fall back to regex if parse fails
+		extractJoinsRegex(sql, analysis)
+		return
+	}
+
+	// Extract joins from SELECT statement
+	switch stmt := stmt.(type) {
+	case *sqlparser.Select:
+		for _, tableExpr := range stmt.From {
+			extractJoinsFromExpr(tableExpr, analysis)
+		}
+	}
+}
+
+// extractJoinsFromExpr recursively extracts joins from table expressions
+func extractJoinsFromExpr(tableExpr sqlparser.TableExpr, analysis *QueryAnalysis) {
+	switch table := tableExpr.(type) {
+	case *sqlparser.JoinTableExpr:
+		// Process left side first
+		extractJoinsFromExpr(table.LeftExpr, analysis)
+
+		// Extract right table info
+		rightAlias := ""
+		rightTable := ""
+		if aliased, ok := table.RightExpr.(*sqlparser.AliasedTableExpr); ok {
+			if tableName, ok := aliased.Expr.(sqlparser.TableName); ok {
+				rightTable = tableName.Name.String()
+				rightAlias = rightTable
+				if !aliased.As.IsEmpty() {
+					rightAlias = aliased.As.String()
+				}
+			}
+		}
+
+		// Determine join type
+		joinType := "INNER"
+		switch table.Join {
+		case sqlparser.LeftJoinStr:
+			joinType = "LEFT"
+		case sqlparser.RightJoinStr:
+			joinType = "RIGHT"
+		case sqlparser.JoinStr:
+			joinType = "INNER"
+		}
+
+		// Parse ON condition
+		var condition string
+		var onColumns []JoinColumn
+		if table.Condition.On != nil {
+			condition = sqlparser.String(table.Condition.On)
+			onColumns = parseJoinCondition(condition)
+		}
+
+		// Determine left table
+		leftAlias := ""
+		leftTable := ""
+		if len(onColumns) > 0 {
+			if onColumns[0].RightAlias == rightAlias {
+				leftAlias = onColumns[0].LeftAlias
+			} else if onColumns[0].LeftAlias == rightAlias {
+				leftAlias = onColumns[0].RightAlias
+			}
+			if leftAlias != "" {
+				if lt, ok := analysis.Tables[leftAlias]; ok {
+					leftTable = lt
+				}
+			}
+		}
+
+		if rightTable != "" {
+			joinInfo := JoinInfo{
+				LeftAlias:  leftAlias,
+				LeftTable:  leftTable,
+				RightAlias: rightAlias,
+				RightTable: rightTable,
+				JoinType:   joinType,
+				Condition:  condition,
+				OnColumns:  onColumns,
+			}
+			analysis.Joins = append(analysis.Joins, joinInfo)
+		}
+
+		// Process right side recursively
+		extractJoinsFromExpr(table.RightExpr, analysis)
+	}
+}
+
+// extractJoinsRegex is the fallback regex-based implementation
+func extractJoinsRegex(sql string, analysis *QueryAnalysis) {
 	// Remove comments
 	sql = removeComments(sql)
 
