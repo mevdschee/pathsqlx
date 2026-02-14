@@ -41,6 +41,8 @@ type QueryAnalysis struct {
 }
 
 // AnalyzeQuery parses a SQL query to extract structure information
+// Uses Vitess SQL parser to correctly handle subqueries, CTEs, and complex expressions
+// Falls back to regex parsing if SQL parsing fails (e.g., for non-standard SQL)
 func AnalyzeQuery(sql string) (*QueryAnalysis, error) {
 	analysis := &QueryAnalysis{
 		Tables:    make(map[string]string),
