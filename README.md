@@ -41,7 +41,7 @@ Consider the following query that fetches a post and its comments:
 
 ```sql
 SELECT 
-    posts.id, posts.title, posts.content, posts.created,
+    posts.id, posts.title, posts.content,
     comments.id, comments.message
 FROM 
     posts, comments 
