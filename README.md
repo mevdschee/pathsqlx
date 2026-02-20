@@ -8,8 +8,8 @@ The path engine implementations in Go for PathQL (see:
 - **Only tables can have a path** - column paths are not supported
 - **Aliases are preserved in the resulting JSON** - any alias specified for
   tables or columns will be used in the output
-- **Paths can specify arrays** - if the path ends with [], it's an array;
-  otherwise, it's an object (single result)
+- **Path hints can specify arrays** - if the path ends with `[]`, it's an array;
+  otherwise, it's an object (single result), `$` is the root.
 
 ### Algorithm
 
