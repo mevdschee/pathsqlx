@@ -66,16 +66,15 @@ This results in the following column mapping:
 | `posts.id` | `$.posts[].id` |
 | `posts.title` | `$.posts[].title` |
 | `posts.content` | `$.posts[].content` |
-| `posts.created` | `$.posts[].created` |
 | `comments.id` | `$.posts[].comments[].id` |
 | `comments.message` | `$.posts[].comments[].message` |
 
 #### 2. Result Transformation
 The database returns flattened rows:
-| posts.id | posts.title | posts.content | posts.created | comments.id | comments.message |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | Hello world! | Welcome to the first post. | 2018-03-05T20:12:56Z | 1 | Hi! |
-| 1 | Hello world! | Welcome to the first post. | 2018-03-05T20:12:56Z | 2 | Thank you. |
+| posts.id | posts.title | posts.content | comments.id | comments.message |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | Hello world! | Welcome to the first post. | 1 | Hi! |
+| 1 | Hello world! | Welcome to the first post. | 2 | Thank you. |
 
 The engine processes these rows:
 1.  **Grouping**: Detects the `posts[]` and `comments[]` markers.
@@ -90,7 +89,6 @@ The engine processes these rows:
             "id": 1,
             "title": "Hello world!",
             "content": "Welcome to the first post.",
-            "created": "2018-03-05T20:12:56Z",
             "comments": [
                 {
                     "id": 1,
