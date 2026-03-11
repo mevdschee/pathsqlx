@@ -10,11 +10,34 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/iancoleman/orderedmap"
 	"github.com/jmoiron/sqlx"
 	"github.com/mevdschee/pathsqlx/metadata"
 )
+
+var (
+	// metadataFilename is the configurable path to the metadata YAML file.
+	// If empty (default), metadata will be read from the database.
+	metadataFilename string
+	// globalMetadataReader stores the database-derived metadata reader
+	// when metadataFilename is empty.
+	globalMetadataReader metadata.MetadataReader
+	// metadataMu protects access to global metadata variables.
+	metadataMu sync.RWMutex
+)
+
+// SetMetadataFilename configures the metadata source.
+// If filename is empty (default), metadata will be read from the database.
+// If filename is non-empty, metadata will be loaded from that YAML file.
+func SetMetadataFilename(filename string) {
+	metadataMu.Lock()
+	defer metadataMu.Unlock()
+	metadataFilename = filename
+	// Clear the global reader when changing configuration
+	globalMetadataReader = nil
+}
 
 // Type aliases for sqlx types to enable drop-in replacement
 type (
@@ -337,21 +360,39 @@ func (db *DB) removeHashes(tree *orderedmap.OrderedMap, path string) (interface{
 func (db *DB) PathQuery(query string, arg interface{}) (interface{}, error) {
 	// Initialize metadata reader if not already done
 	if db.metadataReader == nil {
-		schema, err := metadata.LoadDefault()
-		if err != nil {
-			return nil, fmt.Errorf("loading %s: %w", metadata.DefaultFilename, err)
-		}
-		if schema == nil {
-			// File does not exist — analyze the database and create it
-			schema, err = metadata.Analyze(db.DB.DB, db.DriverName())
+		metadataMu.RLock()
+		configuredFilename := metadataFilename
+		metadataMu.RUnlock()
+
+		if configuredFilename != "" {
+			// Load from configured YAML file
+			schema, err := metadata.Load(configuredFilename)
 			if err != nil {
-				return nil, fmt.Errorf("analyzing database schema: %w", err)
+				return nil, fmt.Errorf("loading metadata from %s: %w", configuredFilename, err)
 			}
-			if err := schema.Save(metadata.DefaultFilename); err != nil {
-				return nil, fmt.Errorf("saving %s: %w", metadata.DefaultFilename, err)
+			db.metadataReader = schema.NewMetadataReader()
+		} else {
+			// Check if we have a cached global reader from database
+			metadataMu.RLock()
+			if globalMetadataReader != nil {
+				db.metadataReader = globalMetadataReader
+				metadataMu.RUnlock()
+			} else {
+				metadataMu.RUnlock()
+				// Read from database and cache globally
+				schema, err := metadata.Analyze(db.DB.DB, db.DriverName())
+				if err != nil {
+					return nil, fmt.Errorf("analyzing database schema: %w", err)
+				}
+				reader := schema.NewMetadataReader()
+
+				metadataMu.Lock()
+				globalMetadataReader = reader
+				metadataMu.Unlock()
+
+				db.metadataReader = reader
 			}
 		}
-		db.metadataReader = schema.NewMetadataReader()
 	}
 
 	// Analyze query for structure and hints
