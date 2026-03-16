@@ -43,15 +43,18 @@ type QueryAnalysis struct {
 // AnalyzeQuery parses a SQL query to extract structure information
 // Uses Vitess SQL parser to correctly handle subqueries, CTEs, and complex expressions
 // Falls back to regex parsing if SQL parsing fails (e.g., for non-standard SQL)
-func AnalyzeQuery(sql string) (*QueryAnalysis, error) {
+// hints parameter provides path overrides for table aliases
+func AnalyzeQuery(sql string, hints map[string]string) (*QueryAnalysis, error) {
 	analysis := &QueryAnalysis{
 		Tables:    make(map[string]string),
 		Joins:     []JoinInfo{},
 		PathHints: make(map[string]string),
 	}
 
-	// Extract path hints from comments
-	analysis.PathHints = extractPathHints(sql)
+	// Use provided hints instead of extracting from comments
+	if hints != nil {
+		analysis.PathHints = hints
+	}
 
 	// Extract tables and aliases from FROM clause
 	extractFromClause(sql, analysis)
@@ -62,10 +65,11 @@ func AnalyzeQuery(sql string) (*QueryAnalysis, error) {
 	return analysis, nil
 }
 
-// extractPathHints extracts PATH hints from SQL comments
-// Format: -- PATH table_alias $.path or -- PATH: table_alias $.path
+// extractPathHints has been deprecated - path hints are now passed as explicit parameters
+// Format was: -- PATH table_alias $.path or -- PATH: table_alias $.path
 // PATH hints apply to table aliases only, not individual columns
 // Special case: Use $ as alias for queries without a real table
+/*
 func extractPathHints(sql string) map[string]string {
 	hints := make(map[string]string)
 
@@ -85,6 +89,7 @@ func extractPathHints(sql string) map[string]string {
 
 	return hints
 }
+*/
 
 // extractFromClause extracts table and alias from FROM clause using SQL parser
 func extractFromClause(sql string, analysis *QueryAnalysis) {

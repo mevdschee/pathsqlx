@@ -357,7 +357,8 @@ func (db *DB) removeHashes(tree *orderedmap.OrderedMap, path string) (interface{
 }
 
 // PathQuery is the query that returns nested paths
-func (db *DB) PathQuery(query string, arg interface{}) (interface{}, error) {
+// hints parameter allows specifying path overrides for table aliases (e.g., {"posts": "$.posts", "$": "$.statistics"})
+func (db *DB) PathQuery(query string, arg interface{}, hints map[string]string) (interface{}, error) {
 	// Initialize metadata reader if not already done
 	if db.metadataReader == nil {
 		metadataMu.RLock()
@@ -395,8 +396,8 @@ func (db *DB) PathQuery(query string, arg interface{}) (interface{}, error) {
 		}
 	}
 
-	// Analyze query for structure and hints
-	analysis, err := AnalyzeQuery(query)
+	// Analyze query for structure with provided hints
+	analysis, err := AnalyzeQuery(query, hints)
 	if err != nil {
 		return nil, err
 	}

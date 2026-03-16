@@ -125,6 +125,7 @@ func TestPathQuery(t *testing.T) {
 		name    string
 		query   string
 		arg     map[string]interface{}
+		hints   map[string]string
 		want    string
 		wantErr bool
 	}{
@@ -132,48 +133,56 @@ func TestPathQuery(t *testing.T) {
 			name:  "single record no path",
 			query: `SELECT id, content FROM posts WHERE id = :id`,
 			arg:   map[string]interface{}{"id": 1},
+			hints: nil,
 			want:  `[{"id":1,"content":"blog started"}]`,
 		},
 		{
 			name:  "two records no path",
 			query: `SELECT id FROM posts WHERE id <= 2 ORDER BY id`,
 			arg:   map[string]interface{}{},
+			hints: nil,
 			want:  `[{"id":1},{"id":2}]`,
 		},
 		{
 			name:  "count as object with path",
-			query: `SELECT count(*) AS posts FROM posts p -- PATH p $`,
+			query: `SELECT count(*) AS posts FROM posts p`,
 			arg:   map[string]interface{}{},
+			hints: map[string]string{"p": "$"},
 			want:  `{"posts":2}`,
 		},
 		{
 			name:  "nested statistics object",
-			query: `SELECT count(*) AS posts FROM posts p -- PATH p $.statistics`,
+			query: `SELECT count(*) AS posts FROM posts p`,
 			arg:   map[string]interface{}{},
+			hints: map[string]string{"p": "$.statistics"},
 			want:  `{"statistics":{"posts":2}}`,
 		},
 		{
 			name:  "two tables with path - flat array",
-			query: `SELECT posts.id, comments.id FROM posts LEFT JOIN comments ON post_id = posts.id WHERE posts.id = 1 ORDER BY comments.id -- PATH comments $[].comments`,
+			query: `SELECT posts.id, comments.id FROM posts LEFT JOIN comments ON post_id = posts.id WHERE posts.id = 1 ORDER BY comments.id`,
 			arg:   map[string]interface{}{},
+			hints: map[string]string{"comments": "$[].comments"},
 			want:  `[{"posts":{"id":1},"comments":[{"id":1},{"id":2}]}]`,
 		},
 		{
 			name:  "posts with comments nested",
-			query: `SELECT posts.id, comments.id FROM posts LEFT JOIN comments ON post_id = posts.id WHERE posts.id <= 2 ORDER BY posts.id, comments.id -- PATH posts $.posts`,
+			query: `SELECT posts.id, comments.id FROM posts LEFT JOIN comments ON post_id = posts.id WHERE posts.id <= 2 ORDER BY posts.id, comments.id`,
 			arg:   map[string]interface{}{},
+			hints: map[string]string{"posts": "$.posts"},
 			want:  `{"posts":[{"id":1,"comments":[{"id":1},{"id":2}]},{"id":2,"comments":[{"id":3},{"id":4}]}]}`,
 		},
 		{
 			name:  "count posts grouped",
 			query: `SELECT categories.name as name, count(posts.id) AS post_count FROM posts, categories WHERE posts.category_id = categories.id GROUP BY categories.name ORDER BY categories.name`,
 			arg:   map[string]interface{}{},
+			hints: nil,
 			want:  `[{"name":"announcement","post_count":2}]`,
 		},
 		{
 			name:  "multiple scalar counts",
-			query: `SELECT (SELECT count(*) FROM posts) as posts, (SELECT count(*) FROM comments) as comments -- PATH $ $.statistics`,
+			query: `SELECT (SELECT count(*) FROM posts) as posts, (SELECT count(*) FROM comments) as comments`,
 			arg:   map[string]interface{}{},
+			hints: map[string]string{"$": "$.statistics"},
 			want:  `{"statistics":{"posts":2,"comments":4}}`,
 		},
 	}
@@ -190,7 +199,7 @@ func TestPathQuery(t *testing.T) {
 
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
-					got, err := db.PathQuery(tt.query, tt.arg)
+					got, err := db.PathQuery(tt.query, tt.arg, tt.hints)
 					if (err != nil) != tt.wantErr {
 						t.Errorf("PathQuery() error = %v, wantErr %v", err, tt.wantErr)
 						return
@@ -360,6 +369,7 @@ func TestAutomaticPathInference(t *testing.T) {
 		name    string
 		query   string
 		arg     map[string]interface{}
+		hints   map[string]string
 		want    string
 		wantErr bool
 	}{
@@ -367,24 +377,28 @@ func TestAutomaticPathInference(t *testing.T) {
 			name:  "simple query with no joins",
 			query: `SELECT p.id, p.content FROM posts p WHERE p.id = :id`,
 			arg:   map[string]interface{}{"id": 1},
+			hints: nil,
 			want:  `[{"id":1,"content":"blog started"}]`,
 		},
 		{
 			name:  "posts with comments (one-to-many)",
 			query: `SELECT p.id, p.content, c.id, c.message FROM posts p LEFT JOIN comments c ON c.post_id = p.id WHERE p.id = 1 ORDER BY c.id`,
 			arg:   map[string]interface{}{},
+			hints: nil,
 			want:  `[{"p":{"id":1,"content":"blog started"},"c":[{"id":1,"message":"great!"},{"id":2,"message":"nice!"}]}]`,
 		},
 		{
 			name:  "multiple posts with comments",
 			query: `SELECT p.id, c.id, c.message FROM posts p LEFT JOIN comments c ON c.post_id = p.id WHERE p.id <= 2 ORDER BY p.id, c.id`,
 			arg:   map[string]interface{}{},
+			hints: nil,
 			want:  `[{"p":{"id":1},"c":[{"id":1,"message":"great!"},{"id":2,"message":"nice!"}]},{"p":{"id":2},"c":[{"id":3,"message":"interesting"},{"id":4,"message":"cool"}]}]`,
 		},
 		{
 			name:  "posts with category (many-to-one)",
 			query: `SELECT p.id, p.content, cat.id, cat.name FROM posts p LEFT JOIN categories cat ON p.category_id = cat.id WHERE p.id = 1`,
 			arg:   map[string]interface{}{},
+			hints: nil,
 			want:  `[{"p":{"id":1,"content":"blog started"},"cat":{"id":1,"name":"announcement"}}]`,
 		},
 	}
@@ -401,7 +415,7 @@ func TestAutomaticPathInference(t *testing.T) {
 
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
-					got, err := db.PathQuery(tt.query, tt.arg)
+					got, err := db.PathQuery(tt.query, tt.arg, tt.hints)
 					if (err != nil) != tt.wantErr {
 						t.Errorf("PathQuery() error = %v, wantErr %v", err, tt.wantErr)
 						return
