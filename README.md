@@ -1,6 +1,6 @@
 # pathsqlx
 
-The path engine implementations in Go for PathQL (see:
+A path engine implementation in Go for PathQL (see:
 [PathQL.org](https://pathql.org/)).
 
 ### Usage
