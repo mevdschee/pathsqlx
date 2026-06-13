@@ -359,6 +359,50 @@ func (db *DB) removeHashes(tree *orderedmap.OrderedMap, path string) (interface{
 // PathQuery is the query that returns nested paths
 // hints parameter allows specifying path overrides for table aliases (e.g., {"posts": "$.posts", "$": "$.statistics"})
 func (db *DB) PathQuery(query string, arg interface{}, hints map[string]string) (interface{}, error) {
+	rows, err := db.NamedQuery(query, arg)
+	if err != nil {
+		return nil, err
+	}
+	return db.pathQueryFromRows(query, hints, rows)
+}
+
+// PathQueryContext behaves exactly like PathQuery but runs the named query
+// context-aware on the connection pool.
+func (db *DB) PathQueryContext(ctx context.Context, query string, arg interface{}, hints map[string]string) (interface{}, error) {
+	q, args, err := sqlx.Named(query, arg)
+	if err != nil {
+		return nil, err
+	}
+	q = db.Rebind(q)
+	rows, err := db.QueryxContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	return db.pathQueryFromRows(query, hints, rows)
+}
+
+// PathQueryTx behaves exactly like PathQuery but runs the named query on the
+// supplied transaction, so any prior SET LOCAL on that same transaction/
+// connection applies to the query.
+func (db *DB) PathQueryTx(ctx context.Context, tx *sqlx.Tx, query string, arg interface{}, hints map[string]string) (interface{}, error) {
+	q, args, err := sqlx.Named(query, arg)
+	if err != nil {
+		return nil, err
+	}
+	q = tx.Rebind(q)
+	rows, err := tx.QueryxContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	return db.pathQueryFromRows(query, hints, rows)
+}
+
+// pathQueryFromRows holds the logic shared by PathQuery, PathQueryContext and
+// PathQueryTx. It takes the already-produced rows and performs metadata
+// initialization, query analysis, column mapping, record collection,
+// grouping, hashing and tree building. The only difference between the three
+// public entry points is how the rows are produced.
+func (db *DB) pathQueryFromRows(query string, hints map[string]string, rows *sqlx.Rows) (interface{}, error) {
 	// Initialize metadata reader if not already done
 	if db.metadataReader == nil {
 		metadataMu.RLock()
@@ -402,10 +446,6 @@ func (db *DB) PathQuery(query string, arg interface{}, hints map[string]string) 
 		return nil, err
 	}
 
-	rows, err := db.NamedQuery(query, arg)
-	if err != nil {
-		return nil, err
-	}
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, err
