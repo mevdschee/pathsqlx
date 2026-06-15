@@ -31,7 +31,7 @@ result, err := db.PathQuery(
      FROM posts LEFT JOIN comments ON comments.post_id = posts.id 
      WHERE posts.id <= :id ORDER BY posts.id, comments.id`,
     map[string]interface{}{"id": 2},
-    map[string]string{"posts": "$.posts"},
+    map[string]string{"posts": "$.posts[]"},
 )
 // Result: {"posts":[{"id":1,"comments":[...]},{"id":2,"comments":[...]}]}
 ```
@@ -39,7 +39,7 @@ result, err := db.PathQuery(
 The third parameter is a map of path hints where:
 
 - **Key**: table alias from the SQL query
-- **Value**: JSON path (e.g., `$`, `$.posts`, `$[].comments`)
+- **Value**: JSON path (e.g., `$`, `$.posts[]`, `$.stats`)
 - **Special alias `$`**: for queries without real tables (e.g., subquery
   results)
 
@@ -48,8 +48,11 @@ The third parameter is a map of path hints where:
 - **Only tables can have a path** - column paths are not supported
 - **Aliases are preserved in the resulting JSON** - any alias specified for
   tables or columns will be used in the output
-- **Path hints can specify arrays** - if the path ends with `[]`, it's an array;
-  otherwise, it's an object (single result), `$` is the root object.
+- **Path hints are used verbatim** - if the path ends with `[]` it's an array,
+  otherwise it's an object (single result), and `$` is the root object. The
+  engine never adds an `[]` to a hint you provide, so include it when a table is
+  one-to-many. Tables you do not hint are still nested automatically from the
+  foreign keys.
 
 ### Algorithm
 
@@ -60,8 +63,8 @@ The path determination follows these steps:
    provided as an explicit parameter to the `PathQuery` function.
 2. **Cardinality Detection**: For each table, the algorithm determines if it
    represents a "one" or "many" relationship:
-   - **Explicit Hints**: If a path hint ends with `[]`, it's an array. If it's
-     just `$`, it's a single object.
+   - **Explicit Hints**: A hint is used exactly as written - ending in `[]` makes
+     an array and `$` is a single object. The engine does not add `[]` to a hint.
    - **Foreign Keys**: If table B has a foreign key to table A, a join from A to
      B is treated as one-to-many (array).
    - **Join Type**: In the absence of foreign key info, `LEFT JOIN` defaults to
@@ -108,7 +111,7 @@ result, err := db.PathQuery(
     WHERE 
         comments.post_id = posts.id AND posts.id = :id`,
     map[string]interface{}{"id": 1},
-    map[string]string{"posts": "$.posts"},
+    map[string]string{"posts": "$.posts[]"},
 )
 ```
 
@@ -120,13 +123,12 @@ The algorithm evaluates the query structure and database metadata:
   `WHERE` clause condition.
 - **Cardinality Detection**: Uses foreign key metadata to determine that one
   post can have multiple comments (`one-to-many`).
-- **Hint Application**: The hint `{"posts": "$.posts"}` directs the engine to
-  nest the results under a root `posts` key.
+- **Hint Application**: The hint `{"posts": "$.posts[]"}` directs the engine to
+  nest the results under a root `posts` array.
 - **Inferred Paths**:
-  - `posts` => `$.posts[]` (Based on the hint, the `[]` is added because the
-    table is an array)
-  - `comments` => `$.posts[].comments[]` (Automatically nested inside the post
-    object based on the detected relationship)
+  - `posts` => `$.posts[]` (used verbatim from the hint)
+  - `comments` => `$.posts[].comments[]` (no hint of its own, nested inside the
+    post array automatically based on the detected relationship)
 
 This results in the following column mapping:
 

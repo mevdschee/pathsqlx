@@ -168,15 +168,9 @@ func (e *PathInferenceEngine) inferColumnPath(column string, analysis *QueryAnal
 		alias = parts[0]
 		colName = parts[1]
 
-		// Check for path hint for the table alias
+		// A provided hint is used verbatim; only the column is appended.
+		// Write [] in the hint when you want an array.
 		if hintPath, ok := analysis.PathHints[alias]; ok {
-			// Need to add array marker if this table has multiple rows
-			if cardinality[alias] {
-				// Check if hint already ends with []
-				if !strings.HasSuffix(hintPath, "[]") {
-					return hintPath + "[]." + colName, nil
-				}
-			}
 			return hintPath + "." + colName, nil
 		}
 	} else {
@@ -195,15 +189,8 @@ func (e *PathInferenceEngine) inferColumnPath(column string, analysis *QueryAnal
 			return "$." + colName, nil
 		}
 
-		// Check for path hint for the table alias
+		// A provided hint is used verbatim; only the column is appended.
 		if hintPath, ok := analysis.PathHints[alias]; ok {
-			// Need to add array marker if this table has multiple rows
-			if cardinality[alias] {
-				// Check if hint already ends with []
-				if !strings.HasSuffix(hintPath, "[]") {
-					return hintPath + "[]." + colName, nil
-				}
-			}
 			return hintPath + "." + colName, nil
 		}
 	}
@@ -216,43 +203,20 @@ func (e *PathInferenceEngine) inferColumnPath(column string, analysis *QueryAnal
 		return "$." + colName, nil
 	}
 
-	// For queries with joins, need to check if we have path hints
-	// If the root table has a path hint, nested tables should be relative to it
+	// For queries with joins, nest non-root tables under the root's hint.
 	rootAlias := e.findRootAlias(analysis)
 	if rootHint, ok := analysis.PathHints[rootAlias]; ok {
-		// Build path relative to the root hint
 		if alias == rootAlias {
-			// This is the root table
-			if cardinality[alias] {
-				if !strings.HasSuffix(rootHint, "[]") {
-					return rootHint + "[]." + colName, nil
-				}
-			}
+			// Root column: use the hint verbatim.
 			return rootHint + "." + colName, nil
-		} else {
-			// This is a joined table - nest it under root
-			if cardinality[rootAlias] {
-				// Root is array
-				if cardinality[alias] {
-					// Nested table is also array
-					if !strings.HasSuffix(rootHint, "[]") {
-						return rootHint + "[]." + alias + "[]." + colName, nil
-					}
-					return rootHint + "." + alias + "[]." + colName, nil
-				}
-				// Nested table is object
-				if !strings.HasSuffix(rootHint, "[]") {
-					return rootHint + "[]." + alias + "." + colName, nil
-				}
-				return rootHint + "." + alias + "." + colName, nil
-			} else {
-				// Root is object
-				if cardinality[alias] {
-					return rootHint + "." + alias + "[]." + colName, nil
-				}
-				return rootHint + "." + alias + "." + colName, nil
-			}
 		}
+		// Joined table without its own hint: nest under the verbatim root hint,
+		// inferring an array when the joined table is one-to-many.
+		marker := ""
+		if cardinality[alias] {
+			marker = "[]"
+		}
+		return rootHint + "." + alias + marker + "." + colName, nil
 	}
 
 	// No path hints - use default behavior

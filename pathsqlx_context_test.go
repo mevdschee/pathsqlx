@@ -46,7 +46,7 @@ var pathQueryCases = []struct {
 		name:  "posts with comments nested",
 		query: `SELECT posts.id, comments.id FROM posts LEFT JOIN comments ON post_id = posts.id WHERE posts.id <= 2 ORDER BY posts.id, comments.id`,
 		arg:   map[string]interface{}{},
-		hints: map[string]string{"posts": "$.posts"},
+		hints: map[string]string{"posts": "$.posts[]"},
 		want:  `{"posts":[{"id":1,"comments":[{"id":1},{"id":2}]},{"id":2,"comments":[{"id":3},{"id":4}]}]}`,
 	},
 }
